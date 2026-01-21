@@ -7,8 +7,10 @@ import (
 	"net/http"
 )
 
+var storage *Storage
 var cardSvc *CardService
 var seSvc *SecureElementService
+var authSvc *AuthService
 
 type SetReaderRequest struct {
 	Reader string `json:"reader"`
@@ -19,7 +21,7 @@ type VerifyPinRequest struct {
 }
 
 func main() {
-	storage := &Storage{}
+	storage = &Storage{}
 
 	var err error
 	cardSvc, err = NewCardService(storage)
@@ -28,6 +30,7 @@ func main() {
 	}
 
 	seSvc = NewSecureElementService()
+	authSvc = NewAuthService()
 
 	cardSvc.SetOnCardRemoved(func(name string) {
 		log.Printf("Card removed from %s, clearing session", name)
@@ -43,6 +46,7 @@ func main() {
 	http.HandleFunc("/admin/card/pin-tries", handlePinTries)
 	http.HandleFunc("/admin/card/last-signed-invoice", handleLastSignedInvoice)
 	http.HandleFunc("/admin/card/taxpayer-info", handleTaxpayerInfo)
+	http.HandleFunc("/admin/card/token", handleGetToken)
 
 	port := ":9999"
 	fmt.Printf("Server running at http://localhost%s\n", port)
@@ -246,4 +250,41 @@ func handleTaxpayerInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(info)
+}
+
+func handleGetToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	activeReader := getActiveReader(w)
+	if activeReader == "" {
+		return
+	}
+
+	info, err := seSvc.GetTaxpayerInfo(activeReader)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read card info: " + err.Error()})
+		return
+	}
+
+	tokenResp, err := authSvc.GetToken(info.CommonName, info.ApiUrl)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Authentication failed: " + err.Error()})
+		return
+	}
+
+	cfg, err := storage.Load()
+	if err == nil {
+		cfg.Token = tokenResp.Token
+		cfg.TokenExpiresAt = tokenResp.ExpiresAt
+		storage.Save(cfg)
+	}
+
+	json.NewEncoder(w).Encode(tokenResp)
 }

@@ -50,6 +50,7 @@ type TaxpayerInfo struct {
 	State                string `json:"state"`
 	Country              string `json:"country"`
 	TaxpayerID           string `json:"taxpayer_id"`
+	ApiUrl               string `json:"api_url"`
 	CertificateValidTo   string `json:"certificate_valid_to"`
 }
 
@@ -57,6 +58,7 @@ type SecureElementService struct {
 	mu         sync.Mutex
 	isVerified bool
 	cachedPin  []byte
+	cachedInfo *TaxpayerInfo
 }
 
 func NewSecureElementService() *SecureElementService {
@@ -68,6 +70,7 @@ func (s *SecureElementService) ClearSession() {
 	defer s.mu.Unlock()
 	s.isVerified = false
 	s.cachedPin = nil
+	s.cachedInfo = nil
 }
 
 func (s *SecureElementService) connectAndSelect(readerName string) (*scard.Context, *scard.Card, error) {
@@ -364,6 +367,14 @@ func (s *SecureElementService) GetLastSignedInvoice(readerName string) (*LastSig
 }
 
 func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo, error) {
+	s.mu.Lock()
+	if s.cachedInfo != nil {
+		info := s.cachedInfo
+		s.mu.Unlock()
+		return info, nil
+	}
+	s.mu.Unlock()
+
 	if readerName == "" {
 		return nil, fmt.Errorf("no active reader selected")
 	}
@@ -401,42 +412,42 @@ func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo
 		State:              "Not Applicable",
 		Country:            "Not Applicable",
 		TaxpayerID:         "Not Applicable",
+		ApiUrl:             "Not Applicable",
 		CertificateValidTo: cert.NotAfter.Format(time.RFC3339),
 	}
 
-	// Iterate over all names to extract fields (including GivenName/Surname which aren't in pkix.Name struct)
 	for _, name := range cert.Subject.Names {
 		val, ok := name.Value.(string)
 		if !ok {
 			continue
 		}
 		switch {
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 3}): // CommonName
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 3}):
 			info.CommonName = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 5}): // SerialNumber
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 5}):
 			info.SerialNumber = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 42}): // GivenName
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 42}):
 			info.GivenName = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 4}): // Surname
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 4}):
 			info.Surname = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 11}): // OU
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 11}):
 			info.OrganizationUnit = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 10}): // Organization
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 10}):
 			info.Organization = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 9}): // Street
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 9}):
 			info.Street = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 7}): // Locality (City)
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 7}):
 			info.City = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 8}): // State/Province
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 8}):
 			info.State = val
-		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 6}): // Country
+		case name.Type.Equal(asn1.ObjectIdentifier{2, 5, 4, 6}):
 			info.Country = val
 		}
 	}
 
-	// TIN Extraction Logic
 	ekuOID := asn1.ObjectIdentifier{2, 5, 29, 37}
-	var environmentOID []int
+	var tinOID []int
+	var urlOID []int
 
 	for _, ext := range cert.Extensions {
 		if ext.Id.Equal(ekuOID) {
@@ -449,7 +460,11 @@ func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo
 
 						env1 := oid[len(oid)-4]
 						env2 := oid[len(oid)-3]
-						environmentOID = []int{1, 3, 6, 1, 4, 1, 49952, env1, env2, 6}
+
+						// TIN ends in .6
+						tinOID = []int{1, 3, 6, 1, 4, 1, 49952, env1, env2, 6}
+						// URL ends in .5
+						urlOID = []int{1, 3, 6, 1, 4, 1, 49952, env1, env2, 5}
 						break
 					}
 				}
@@ -457,20 +472,33 @@ func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo
 		}
 	}
 
-	if len(environmentOID) > 0 {
-		targetOID := asn1.ObjectIdentifier(environmentOID)
+	if len(tinOID) > 0 {
+		targetTIN := asn1.ObjectIdentifier(tinOID)
+		targetURL := asn1.ObjectIdentifier(urlOID)
+
 		for _, ext := range cert.Extensions {
-			if ext.Id.Equal(targetOID) {
-				var tinBytes []byte
-				if _, err := asn1.Unmarshal(ext.Value, &tinBytes); err == nil {
-					info.TaxpayerID = string(tinBytes)
+			if ext.Id.Equal(targetTIN) {
+				var valBytes []byte
+				if _, err := asn1.Unmarshal(ext.Value, &valBytes); err == nil {
+					info.TaxpayerID = string(valBytes)
 				} else {
 					info.TaxpayerID = string(ext.Value)
 				}
-				break
+			}
+			if ext.Id.Equal(targetURL) {
+				var valBytes []byte
+				if _, err := asn1.Unmarshal(ext.Value, &valBytes); err == nil {
+					info.ApiUrl = string(valBytes)
+				} else {
+					info.ApiUrl = string(ext.Value)
+				}
 			}
 		}
 	}
+
+	s.mu.Lock()
+	s.cachedInfo = info
+	s.mu.Unlock()
 
 	return info, nil
 }

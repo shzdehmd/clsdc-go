@@ -10,6 +10,8 @@ const ConfigFile = "config.json"
 
 type Config struct {
 	PreferredReader string `json:"preferred_reader"`
+	Token           string `json:"token"`
+	TokenExpiresAt  string `json:"token_expires_at"`
 }
 
 type Storage struct {
@@ -23,7 +25,7 @@ func (s *Storage) Load() (Config, error) {
 	var cfg Config
 	file, err := os.ReadFile(ConfigFile)
 	if os.IsNotExist(err) {
-		return cfg, nil // Return empty config if file doesn't exist
+		return cfg, nil
 	}
 	if err != nil {
 		return cfg, err
