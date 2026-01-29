@@ -125,9 +125,9 @@ func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *s
 		return nil, nil, nil, fmt.Errorf("failed to transmit SELECT: %w", err)
 	}
 
-	if !isSuccess(resp) {
+	if err := CheckAPDUError(resp); err != nil {
 		s.cleanup(ctx, card)
-		return nil, nil, nil, fmt.Errorf("SELECT failed with SW: %X", resp[len(resp)-2:])
+		return nil, nil, nil, err
 	}
 
 	resp, err = card.Transmit(CmdGetVersion)
@@ -135,9 +135,13 @@ func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *s
 		s.cleanup(ctx, card)
 		return nil, nil, nil, fmt.Errorf("failed to transmit GET VERSION: %w", err)
 	}
-	if !isSuccess(resp) || len(resp) < 14 {
+	if err := CheckAPDUError(resp); err != nil {
 		s.cleanup(ctx, card)
-		return nil, nil, nil, fmt.Errorf("GET VERSION failed")
+		return nil, nil, nil, err
+	}
+	if len(resp) < 14 {
+		s.cleanup(ctx, card)
+		return nil, nil, nil, fmt.Errorf("GET VERSION response too short")
 	}
 
 	version := &SEVersion{
@@ -169,7 +173,7 @@ func (s *SecureElementService) connectAndSelect(readerName string) (*scard.Conte
 		apduVerify = append(apduVerify, pinBytes...)
 
 		resp, err := card.Transmit(apduVerify)
-		if err != nil || !isSuccess(resp) {
+		if err != nil || CheckAPDUError(resp) != nil {
 			s.ClearSession()
 			s.cleanup(ctx, card)
 			return nil, nil, fmt.Errorf("auto-verification failed (Session cleared)")
@@ -236,23 +240,24 @@ func (s *SecureElementService) VerifyPin(readerName string, pin string) (int, er
 		return 0, fmt.Errorf("failed to transmit VERIFY: %w", err)
 	}
 
-	sw := 0
-	if len(resp) >= 2 {
-		sw = (int(resp[len(resp)-2]) << 8) | int(resp[len(resp)-1])
-	}
+	resErr := CheckAPDUError(resp)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if sw == 0x9000 {
+	if resErr == nil {
 		s.isVerified = true
 		s.cachedPin = pin
 	} else {
 		s.isVerified = false
 		s.cachedPin = ""
 	}
+	s.mu.Unlock()
 
-	return sw, nil
+	sw := 0
+	if len(resp) >= 2 {
+		sw = (int(resp[len(resp)-2]) << 8) | int(resp[len(resp)-1])
+	}
+
+	return sw, resErr
 }
 
 func (s *SecureElementService) GetVersion(readerName string) (*SEVersion, error) {
@@ -285,8 +290,8 @@ func (s *SecureElementService) GetCertParams(readerName string) (*CertParams, er
 		return nil, fmt.Errorf("failed to transmit GET CERT PARAMS: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("GET CERT PARAMS failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	if len(resp) < 26 {
@@ -325,8 +330,8 @@ func (s *SecureElementService) GetPinTries(readerName string) (int, error) {
 		return 0, fmt.Errorf("failed to transmit GET PIN TRIES: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return 0, fmt.Errorf("GET PIN TRIES failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return 0, err
 	}
 
 	if len(resp) < 3 {
@@ -353,8 +358,8 @@ func (s *SecureElementService) GetLastSignedInvoice(readerName string) (*LastSig
 		return nil, fmt.Errorf("failed to transmit GET LAST SIGNED INVOICE: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("GET LAST SIGNED INVOICE failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	return s.parseInvoiceResponse(resp)
@@ -384,8 +389,8 @@ func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo
 		return nil, fmt.Errorf("failed to transmit EXPORT CERTIFICATE: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("EXPORT CERTIFICATE failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	certBytes := resp[:len(resp)-2]
@@ -521,8 +526,8 @@ func (s *SecureElementService) ExportTaxCorePublicKey(readerName string) ([]byte
 		return nil, fmt.Errorf("failed to transmit EXPORT PUBLIC KEY: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("EXPORT PUBLIC KEY failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	return resp[:len(resp)-2], nil
@@ -563,8 +568,8 @@ func (s *SecureElementService) receiveExtendedCommand(readerName string, instruc
 		return nil, fmt.Errorf("failed to transmit extended receive command: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("command failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	return resp[:len(resp)-2], nil
@@ -604,8 +609,8 @@ func (s *SecureElementService) sendExtendedCommand(readerName string, instructio
 		return fmt.Errorf("failed to transmit extended command: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return fmt.Errorf("command failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return err
 	}
 
 	return nil
@@ -629,8 +634,8 @@ func (s *SecureElementService) GetAmountStatus(readerName string) (*AmountStatus
 		return nil, fmt.Errorf("failed to transmit GET AMOUNT STATUS: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("GET AMOUNT STATUS failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	if len(resp) < 16 {
@@ -712,8 +717,8 @@ func (s *SecureElementService) SignInvoice(readerName string, req InvoiceRequest
 		return nil, fmt.Errorf("failed to transmit SIGN INVOICE: %w", err)
 	}
 
-	if !isSuccess(resp) {
-		return nil, fmt.Errorf("SIGN INVOICE failed with SW: %X", resp[len(resp)-2:])
+	if err := CheckAPDUError(resp); err != nil {
+		return nil, err
 	}
 
 	return s.parseInvoiceResponse(resp)
@@ -805,13 +810,4 @@ func (s *SecureElementService) parseInvoiceResponse(resp []byte) (*LastSignedInv
 	invoice.Signature = hex.EncodeToString(data[sigStart : sigStart+signatureLen])
 
 	return invoice, nil
-}
-
-func isSuccess(resp []byte) bool {
-	if len(resp) < 2 {
-		return false
-	}
-	sw1 := resp[len(resp)-2]
-	sw2 := resp[len(resp)-1]
-	return sw1 == 0x90 && sw2 == 0x00
 }

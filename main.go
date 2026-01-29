@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,6 +25,13 @@ type VerifyPinRequest struct {
 }
 
 func main() {
+	flag.BoolVar(&DevMode, "dev", false, "Enable development logging")
+	flag.Parse()
+
+	if DevMode {
+		log.Println("Development Mode Enabled: Logging all HTTP traffic")
+	}
+
 	storage = &Storage{}
 
 	var err error
@@ -71,20 +79,23 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/admin/readers", handleReaders)
-	http.HandleFunc("/admin/card/version", handleCardVersion)
-	http.HandleFunc("/admin/verify-pin", handleVerifyPin)
-	http.HandleFunc("/admin/card/cert-params", handleCertParams)
-	http.HandleFunc("/admin/card/pin-tries", handlePinTries)
-	http.HandleFunc("/admin/card/last-signed-invoice", handleLastSignedInvoice)
-	http.HandleFunc("/admin/card/taxpayer-info", handleTaxpayerInfo)
-	http.HandleFunc("/admin/card/token", handleGetToken)
-	http.HandleFunc("/admin/commands/sync", handleSyncCommands)
-	http.HandleFunc("/admin/card/amount-status", handleAmountStatus)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/readers", handleReaders)
+	mux.HandleFunc("/admin/card/version", handleCardVersion)
+	mux.HandleFunc("/admin/verify-pin", handleVerifyPin)
+	mux.HandleFunc("/admin/card/cert-params", handleCertParams)
+	mux.HandleFunc("/admin/card/pin-tries", handlePinTries)
+	mux.HandleFunc("/admin/card/last-signed-invoice", handleLastSignedInvoice)
+	mux.HandleFunc("/admin/card/taxpayer-info", handleTaxpayerInfo)
+	mux.HandleFunc("/admin/card/token", handleGetToken)
+	mux.HandleFunc("/admin/commands/sync", handleSyncCommands)
+	mux.HandleFunc("/admin/card/amount-status", handleAmountStatus)
+
+	handler := LoggingMiddleware(mux)
 
 	port := ":9999"
 	fmt.Printf("Server running at http://localhost%s\n", port)
-	if err := http.ListenAndServe(port, nil); err != nil {
+	if err := http.ListenAndServe(port, handler); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -148,8 +159,7 @@ func handleCardVersion(w http.ResponseWriter, r *http.Request) {
 
 	version, err := seSvc.GetVersion(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -182,8 +192,7 @@ func handleVerifyPin(w http.ResponseWriter, r *http.Request) {
 
 	sw, err := seSvc.VerifyPin(activeReader, req.Pin)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -209,8 +218,7 @@ func handleCertParams(w http.ResponseWriter, r *http.Request) {
 
 	params, err := seSvc.GetCertParams(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -232,8 +240,7 @@ func handlePinTries(w http.ResponseWriter, r *http.Request) {
 
 	tries, err := seSvc.GetPinTries(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -255,8 +262,7 @@ func handleLastSignedInvoice(w http.ResponseWriter, r *http.Request) {
 
 	invoice, err := seSvc.GetLastSignedInvoice(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -278,8 +284,7 @@ func handleTaxpayerInfo(w http.ResponseWriter, r *http.Request) {
 
 	info, err := seSvc.GetTaxpayerInfo(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -301,15 +306,13 @@ func handleGetToken(w http.ResponseWriter, r *http.Request) {
 
 	info, err := seSvc.GetTaxpayerInfo(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read card info: " + err.Error()})
+		WriteAPIError(w, fmt.Errorf("Failed to read card info: %w", err))
 		return
 	}
 
 	tokenResp, err := authSvc.GetToken(info.CommonName, info.ApiUrl)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Authentication failed: " + err.Error()})
+		WriteAPIError(w, fmt.Errorf("Authentication failed: %w", err))
 		return
 	}
 
@@ -333,8 +336,7 @@ func handleSyncCommands(w http.ResponseWriter, r *http.Request) {
 
 	results, err := cmdSvc.SyncCommands()
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
@@ -356,8 +358,7 @@ func handleAmountStatus(w http.ResponseWriter, r *http.Request) {
 
 	status, err := seSvc.GetAmountStatus(activeReader)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		WriteAPIError(w, err)
 		return
 	}
 
