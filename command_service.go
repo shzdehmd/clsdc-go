@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -94,10 +95,11 @@ func (s *CommandService) SyncCommands() ([]CommandLogEntry, error) {
 		}
 
 		entry := CommandLogEntry{
-			CommandID: cmd.CommandId,
-			Type:      cmd.Type,
-			Success:   success,
-			Error:     errMsg,
+			ProcessedAt: time.Now().Format(time.RFC3339),
+			CommandID:   cmd.CommandId,
+			Type:        cmd.Type,
+			Success:     success,
+			Error:       errMsg,
 		}
 		s.storage.AppendCommandLog(entry)
 		results = append(results, entry)
@@ -168,6 +170,9 @@ func (s *CommandService) fetchCommands(apiUrl, token string) ([]TaxCoreCommand, 
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			TLSClientConfig: &tls.Config{
+				Renegotiation: tls.RenegotiateOnceAsClient,
+			},
 		},
 	}
 	resp, err := client.Do(req)
@@ -206,6 +211,9 @@ func (s *CommandService) notifyCommandProcessed(apiUrl, token, commandId string,
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			TLSClientConfig: &tls.Config{
+				Renegotiation: tls.RenegotiateOnceAsClient,
+			},
 		},
 	}
 	resp, err := client.Do(req)
