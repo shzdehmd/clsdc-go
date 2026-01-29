@@ -50,10 +50,23 @@ func main() {
 			log.Printf("Initial Time Sync Warning: %v", err)
 		}
 
-		ticker := time.NewTicker(6 * time.Hour)
-		for range ticker.C {
-			if err := timeSvc.SyncTime(); err != nil {
-				log.Printf("Periodic Time Sync Warning: %v", err)
+		timeTicker := time.NewTicker(6 * time.Hour)
+		statusTicker := time.NewTicker(5 * time.Minute)
+
+		for {
+			select {
+			case <-timeTicker.C:
+				if err := timeSvc.SyncTime(); err != nil {
+					log.Printf("Periodic Time Sync Warning: %v", err)
+				}
+			case <-statusTicker.C:
+				cfg, _ := storage.Load()
+				if cfg.Token != "" {
+					log.Println("Sending Online Status Heartbeat...")
+					if err := cmdSvc.NotifyOnlineStatus(); err != nil {
+						log.Printf("Heartbeat Warning: %v", err)
+					}
+				}
 			}
 		}
 	}()
