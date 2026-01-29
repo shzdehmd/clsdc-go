@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"os"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -30,8 +28,7 @@ func (s *TimeService) SyncTime() error {
 
 	data, err := ioutil.ReadFile(TimeServerFile)
 	if err == nil && len(data) > 0 {
-		// The payload from TaxCore is just the raw string (e.g. "0.europe.pool.ntp.org")
-		// Sometimes it might be quoted if saved as JSON string, so we trim
+		// Clean up the string (remove quotes or whitespace)
 		savedUrl := strings.Trim(string(data), "\" \n\r\t")
 		if savedUrl != "" {
 			ntpServer = savedUrl
@@ -52,8 +49,8 @@ func (s *TimeService) SyncTime() error {
 	log.Printf("TimeService: NTP Time is %s (Offset: %v)", now.Format(time.RFC3339), response.ClockOffset)
 
 	// 3. Set System Time
-	// Note: This requires Admin/Root privileges
-	if err := setSystemDate(now); err != nil {
+	// Note: This requires Administrator privileges
+	if err := setSystemTime(now); err != nil {
 		return fmt.Errorf("failed to set system clock (run as admin?): %w", err)
 	}
 
@@ -61,22 +58,12 @@ func (s *TimeService) SyncTime() error {
 	return nil
 }
 
-// --- Platform Specific Logic ---
-
-func setSystemDate(newTime time.Time) error {
-	if runtime.GOOS == "windows" {
-		return setSystemTimeWindows(newTime)
-	} else {
-		return setSystemTimeLinux(newTime)
-	}
-}
-
-// Windows Implementation
-func setSystemTimeWindows(newTime time.Time) error {
+// setSystemTime updates the Windows OS clock
+func setSystemTime(newTime time.Time) error {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	procSetSystemTime := kernel32.NewProc("SetSystemTime")
 
-	// Windows expects UTC
+	// Windows SetSystemTime expects UTC
 	t := newTime.UTC()
 
 	type SYSTEMTIME struct {
@@ -106,13 +93,4 @@ func setSystemTimeWindows(newTime time.Time) error {
 		return err
 	}
 	return nil
-}
-
-// Linux/Unix Implementation
-func setSystemTimeLinux(newTime time.Time) error {
-	tv := syscall.Timeval{
-		Sec:  newTime.Unix(),
-		Usec: int64(newTime.Nanosecond() / 1000),
-	}
-	return syscall.Settimeofday(&tv)
 }

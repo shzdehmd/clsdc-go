@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 )
 
 var storage *Storage
@@ -12,6 +13,7 @@ var cardSvc *CardService
 var seSvc *SecureElementService
 var authSvc *AuthService
 var cmdSvc *CommandService
+var timeSvc *TimeService
 
 type SetReaderRequest struct {
 	Reader string `json:"reader"`
@@ -32,7 +34,8 @@ func main() {
 
 	seSvc = NewSecureElementService()
 	authSvc = NewAuthService()
-	cmdSvc = NewCommandService(storage, seSvc, cardSvc)
+	timeSvc = NewTimeService()
+	cmdSvc = NewCommandService(storage, seSvc, cardSvc, timeSvc)
 
 	cardSvc.SetOnCardRemoved(func(name string) {
 		log.Printf("Card removed from %s, clearing session", name)
@@ -40,6 +43,20 @@ func main() {
 	})
 
 	cardSvc.StartWatcher()
+
+	go func() {
+		log.Println("Performing initial time sync...")
+		if err := timeSvc.SyncTime(); err != nil {
+			log.Printf("Initial Time Sync Warning: %v", err)
+		}
+
+		ticker := time.NewTicker(6 * time.Hour)
+		for range ticker.C {
+			if err := timeSvc.SyncTime(); err != nil {
+				log.Printf("Periodic Time Sync Warning: %v", err)
+			}
+		}
+	}()
 
 	http.HandleFunc("/admin/readers", handleReaders)
 	http.HandleFunc("/admin/card/version", handleCardVersion)

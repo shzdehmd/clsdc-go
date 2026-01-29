@@ -31,13 +31,15 @@ type CommandService struct {
 	storage *Storage
 	seSvc   *SecureElementService
 	cardSvc *CardService
+	timeSvc *TimeService
 }
 
-func NewCommandService(storage *Storage, seSvc *SecureElementService, cardSvc *CardService) *CommandService {
+func NewCommandService(storage *Storage, seSvc *SecureElementService, cardSvc *CardService, timeSvc *TimeService) *CommandService {
 	return &CommandService{
 		storage: storage,
 		seSvc:   seSvc,
 		cardSvc: cardSvc,
+		timeSvc: timeSvc,
 	}
 }
 
@@ -115,7 +117,16 @@ func (s *CommandService) processSingleCommand(readerName string, cmd TaxCoreComm
 		return ioutil.WriteFile("verification_url.json", cmd.Payload, 0644)
 
 	case CmdSetTimeServer:
-		return ioutil.WriteFile("time_server.json", cmd.Payload, 0644)
+		err := ioutil.WriteFile("time_server.json", cmd.Payload, 0644)
+		if err != nil {
+			return err
+		}
+		go func() {
+			if err := s.timeSvc.SyncTime(); err != nil {
+				log.Printf("Time Sync Failed: %v", err)
+			}
+		}()
+		return nil
 
 	case CmdForwardProofAudit:
 		return s.handleSECommand(readerName, cmd.Payload, s.seSvc.EndAudit)
