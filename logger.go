@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
 )
