@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +54,26 @@ type TaxpayerInfo struct {
 	TaxpayerID           string `json:"taxpayer_id"`
 	ApiUrl               string `json:"api_url"`
 	CertificateValidTo   string `json:"certificate_valid_to"`
+}
+
+type AmountStatus struct {
+	LimitAmount string `json:"limit_amount"`
+	SumAmount   string `json:"sum_amount"`
+}
+
+type TaxCategory struct {
+	ID     uint8   `json:"id"`
+	Amount float64 `json:"amount"`
+}
+
+type InvoiceRequest struct {
+	Date          time.Time     `json:"date"`
+	TaxpayerID    string        `json:"taxpayer_id"`
+	BuyerID       string        `json:"buyer_id"` // Optional
+	InvoiceType   uint8         `json:"invoice_type"`
+	TransactionType uint8       `json:"transaction_type"`
+	Amount        float64       `json:"amount"`
+	TaxCategories []TaxCategory `json:"tax_categories"`
 }
 
 type SecureElementService struct {
@@ -335,68 +357,7 @@ func (s *SecureElementService) GetLastSignedInvoice(readerName string) (*LastSig
 		return nil, fmt.Errorf("GET LAST SIGNED INVOICE failed with SW: %X", resp[len(resp)-2:])
 	}
 
-	dataLen := len(resp) - 2
-	if dataLen < 321 {
-		return nil, fmt.Errorf("response too short: %d", dataLen)
-	}
-
-	data := resp[:dataLen]
-
-	dateMs := binary.BigEndian.Uint64(data[0:8])
-	dateObj := time.UnixMilli(int64(dateMs))
-
-	taxpayerID := strings.Trim(string(data[8:28]), "\x00")
-	buyerID := strings.Trim(string(data[28:48]), "\x00")
-
-	invType := data[48]
-	invTypeStr := "Unknown"
-	switch invType {
-	case 0:
-		invTypeStr = "Normal"
-	case 1:
-		invTypeStr = "Proforma"
-	case 2:
-		invTypeStr = "Copy"
-	case 3:
-		invTypeStr = "Training"
-	}
-
-	txType := data[49]
-	txTypeStr := "Unknown"
-	switch txType {
-	case 0:
-		txTypeStr = "Sale"
-	case 1:
-		txTypeStr = "Refund"
-	}
-
-	amtBytes := []byte{0x00}
-	amtBytes = append(amtBytes, data[50:57]...)
-	rawAmt := binary.BigEndian.Uint64(amtBytes)
-	readableAmt := fmt.Sprintf("%.4f", float64(rawAmt)/10000.0)
-
-	invoice := &LastSignedInvoice{
-		DateTime:          dateObj.Format(time.RFC3339),
-		TaxpayerID:        taxpayerID,
-		BuyerID:           buyerID,
-		InvoiceType:       invTypeStr,
-		TransactionType:   txTypeStr,
-		InvoiceAmount:     readableAmt,
-		SaleRefundCounter: binary.BigEndian.Uint32(data[57:61]),
-		TotalCounter:      binary.BigEndian.Uint32(data[61:65]),
-	}
-
-	signatureLen := 256
-	encryptedDataLen := dataLen - 65 - signatureLen
-
-	if encryptedDataLen < 0 {
-		return nil, fmt.Errorf("invalid data structure")
-	}
-
-	invoice.EncryptedInternalData = hex.EncodeToString(data[65 : 65+encryptedDataLen])
-	invoice.Signature = hex.EncodeToString(data[65+encryptedDataLen : 65+encryptedDataLen+signatureLen])
-
-	return invoice, nil
+	return s.parseInvoiceResponse(resp)
 }
 
 func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo, error) {
@@ -581,6 +542,202 @@ func (s *SecureElementService) sendExtendedCommand(readerName string, instructio
 	}
 
 	return nil
+}
+
+func (s *SecureElementService) GetAmountStatus(readerName string) (*AmountStatus, error) {
+	if readerName == "" {
+		return nil, fmt.Errorf("no active reader selected")
+	}
+
+	ctx, card, err := s.connectAndSelect(readerName)
+	if err != nil {
+		return nil, err
+	}
+	defer s.cleanup(ctx, card)
+
+	apdu := []byte{0x88, InsAmountStatus, 0x04, 0x00, 0x00}
+
+	resp, err := card.Transmit(apdu)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transmit GET AMOUNT STATUS: %w", err)
+	}
+
+	if !isSuccess(resp) {
+		return nil, fmt.Errorf("GET AMOUNT STATUS failed with SW: %X", resp[len(resp)-2:])
+	}
+
+	if len(resp) < 16 {
+		return nil, fmt.Errorf("invalid response length")
+	}
+
+	data := resp[:len(resp)-2]
+
+	sumBytes := append([]byte{0x00}, data[0:7]...)
+	sumRaw := binary.BigEndian.Uint64(sumBytes)
+
+	limitBytes := append([]byte{0x00}, data[7:14]...)
+	limitRaw := binary.BigEndian.Uint64(limitBytes)
+
+	return &AmountStatus{
+		SumAmount:   fmt.Sprintf("%.4f", float64(sumRaw)/10000.0),
+		LimitAmount: fmt.Sprintf("%.4f", float64(limitRaw)/10000.0),
+	}, nil
+}
+
+func (s *SecureElementService) SignInvoice(readerName string, req InvoiceRequest) (*LastSignedInvoice, error) {
+	if readerName == "" {
+		return nil, fmt.Errorf("no active reader selected")
+	}
+
+	ctx, card, version, err := s.connectRaw(readerName)
+	if err != nil {
+		return nil, err
+	}
+	defer s.cleanup(ctx, card)
+
+	buf := new(bytes.Buffer)
+
+	dateMs := uint64(req.Date.UnixMilli())
+	binary.Write(buf, binary.BigEndian, dateMs)
+
+	buf.Write(s.stringTo20Bytes(req.TaxpayerID))
+
+	buf.Write(s.stringTo20Bytes(req.BuyerID))
+
+	buf.WriteByte(req.InvoiceType)
+
+	buf.WriteByte(req.TransactionType)
+
+	buf.Write(s.floatTo7Bytes(req.Amount))
+
+	buf.WriteByte(uint8(len(req.TaxCategories)))
+
+	for _, cat := range req.TaxCategories {
+		buf.WriteByte(cat.ID)
+		buf.Write(s.floatTo7Bytes(cat.Amount))
+	}
+
+	payload := buf.Bytes()
+
+	var p1, p2 byte
+	if version.Major > 3 || (version.Major == 3 && version.Minor > 2) || (version.Major == 3 && version.Minor == 2 && version.Patch >= 5) {
+		p1 = 0x01
+		p2 = 0x02
+		crc := crc32.ChecksumIEEE(payload)
+		crcBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(crcBytes, crc)
+		payload = append(payload, crcBytes...)
+	} else {
+		p1 = 0x04
+		p2 = 0x00
+	}
+
+	length := len(payload)
+	apdu := make([]byte, 0, length+9)
+	apdu = append(apdu, 0x88, InsSignInvoice, p1, p2)
+	apdu = append(apdu, 0x00)
+	apdu = append(apdu, byte(length>>8), byte(length&0xFF))
+	apdu = append(apdu, payload...)
+	apdu = append(apdu, 0x00, 0x00)
+
+	resp, err := card.Transmit(apdu)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transmit SIGN INVOICE: %w", err)
+	}
+
+	if !isSuccess(resp) {
+		return nil, fmt.Errorf("SIGN INVOICE failed with SW: %X", resp[len(resp)-2:])
+	}
+
+	return s.parseInvoiceResponse(resp)
+}
+
+func (s *SecureElementService) stringTo20Bytes(val string) []byte {
+	out := make([]byte, 20)
+	raw := []byte(val)
+	copyStart := 20 - len(raw)
+	if copyStart < 0 {
+		copyStart = 0
+		raw = raw[:20]
+	}
+	copy(out[copyStart:], raw)
+	return out
+}
+
+func (s *SecureElementService) floatTo7Bytes(val float64) []byte {
+	intVal := uint64(val * 10000)
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, intVal)
+
+	return buf[1:]
+}
+
+func (s *SecureElementService) parseInvoiceResponse(resp []byte) (*LastSignedInvoice, error) {
+	dataLen := len(resp) - 2
+	if dataLen < 321 {
+		return nil, fmt.Errorf("response too short: %d", dataLen)
+	}
+
+	data := resp[:dataLen]
+
+	dateMs := binary.BigEndian.Uint64(data[0:8])
+	dateObj := time.UnixMilli(int64(dateMs))
+
+	taxpayerID := strings.Trim(string(data[8:28]), "\x00")
+	buyerID := strings.Trim(string(data[28:48]), "\x00")
+
+	invType := data[48]
+	invTypeStr := "Unknown"
+	switch invType {
+	case 0:
+		invTypeStr = "Normal"
+	case 1:
+		invTypeStr = "Proforma"
+	case 2:
+		invTypeStr = "Copy"
+	case 3:
+		invTypeStr = "Training"
+	}
+
+	txType := data[49]
+	txTypeStr := "Unknown"
+	switch txType {
+	case 0:
+		txTypeStr = "Sale"
+	case 1:
+		txTypeStr = "Refund"
+	}
+
+	amtBytes := []byte{0x00}
+	amtBytes = append(amtBytes, data[50:57]...)
+	rawAmt := binary.BigEndian.Uint64(amtBytes)
+	readableAmt := fmt.Sprintf("%.4f", float64(rawAmt)/10000.0)
+
+	invoice := &LastSignedInvoice{
+		DateTime:          dateObj.Format(time.RFC3339),
+		TaxpayerID:        taxpayerID,
+		BuyerID:           buyerID,
+		InvoiceType:       invTypeStr,
+		TransactionType:   txTypeStr,
+		InvoiceAmount:     readableAmt,
+		SaleRefundCounter: binary.BigEndian.Uint32(data[57:61]),
+		TotalCounter:      binary.BigEndian.Uint32(data[61:65]),
+	}
+
+	signatureLen := 256
+
+	remaining := dataLen - 65 - signatureLen
+	if remaining == 260 || remaining == 516 {
+		remaining -= 4
+	}
+
+	invoice.EncryptedInternalData = hex.EncodeToString(data[65 : 65+remaining])
+
+	sigStart := 65 + remaining
+	invoice.Signature = hex.EncodeToString(data[sigStart : sigStart+signatureLen])
+
+	return invoice, nil
 }
 
 func isSuccess(resp []byte) bool {

@@ -80,6 +80,7 @@ func main() {
 	http.HandleFunc("/admin/card/taxpayer-info", handleTaxpayerInfo)
 	http.HandleFunc("/admin/card/token", handleGetToken)
 	http.HandleFunc("/admin/commands/sync", handleSyncCommands)
+	http.HandleFunc("/admin/card/amount-status", handleAmountStatus)
 
 	port := ":9999"
 	fmt.Printf("Server running at http://localhost%s\n", port)
@@ -338,4 +339,27 @@ func handleSyncCommands(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(results)
+}
+
+func handleAmountStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	activeReader := getActiveReader(w)
+	if activeReader == "" {
+		return
+	}
+
+	status, err := seSvc.GetAmountStatus(activeReader)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(status)
 }
