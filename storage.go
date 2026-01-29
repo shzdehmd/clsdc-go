@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"strings"
 )
 
 const (
@@ -89,4 +90,85 @@ func (s *Storage) AppendCommandLog(entry CommandLogEntry) error {
 		return err
 	}
 	return os.WriteFile(CommandLogFile, data, 0644)
+}
+
+// Helper to read generic JSON content
+func (s *Storage) readJsonFile(filename string) (interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := os.ReadFile(filename)
+	if os.IsNotExist(err) {
+		return nil, nil // Return null if file doesn't exist
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var result interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Storage) GetTaxRates() (interface{}, error) {
+	return s.readJsonFile(TaxRatesFile)
+}
+
+func (s *Storage) GetTaxCoreConfig() (interface{}, error) {
+	return s.readJsonFile(TaxCoreConfigFile)
+}
+
+func (s *Storage) GetVerificationUrl() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := os.ReadFile("verification_url.json")
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	// Clean up quotes if they exist (e.g. "http://..." -> http://...)
+	cleanUrl := string(data)
+
+	// Try to unmarshal as a JSON string to handle escaped quotes properly
+	var jsonStr string
+	if err := json.Unmarshal(data, &jsonStr); err == nil {
+		cleanUrl = jsonStr
+	} else {
+		// Fallback: manual trim
+		cleanUrl = strings.Trim(cleanUrl, "\" \n\r")
+	}
+
+	return cleanUrl, nil
+}
+
+// GetRawJSON reads a file and ensures it returns a JSON object/array,
+// unwrapping it if it was saved as a JSON string.
+func (s *Storage) GetRawJSON(filename string) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := os.ReadFile(filename)
+	if os.IsNotExist(err) || len(data) == 0 {
+		return json.RawMessage("null"), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the file content is actually a JSON string literal (e.g. "{\"foo\":...}")
+	// If so, we need to unmarshal the string to get the raw object bytes.
+	var strContent string
+	if err := json.Unmarshal(data, &strContent); err == nil {
+		// It was a string! Return the content of the string as the raw message
+		return json.RawMessage(strContent), nil
+	}
+
+	// It wasn't a string (it was likely already an object or array), return raw bytes
+	return json.RawMessage(data), nil
 }

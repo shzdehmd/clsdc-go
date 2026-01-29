@@ -61,6 +61,13 @@ type HeartbeatResponse struct {
 	Metadata     *CardMetadata         `json:"metadata,omitempty"`
 }
 
+type ConfigResponse struct {
+	TaxRates        json.RawMessage `json:"taxRates"`
+	Environment     json.RawMessage `json:"environment"`
+	VerificationUrl string          `json:"verificationUrl"`
+	Reader          string          `json:"reader"`
+}
+
 // --- Main Entry Point ---
 
 func main() {
@@ -138,6 +145,7 @@ func main() {
 	mux.HandleFunc("/admin/commands/sync", handleSyncCommands)
 	mux.HandleFunc("/admin/card/amount-status", handleAmountStatus)
 	mux.HandleFunc("/admin/heartbeat", handleHeartbeat)
+	mux.HandleFunc("/admin/config", handleGetConfig)
 
 	// 7. Wrap with Middleware
 	handler := LoggingMiddleware(mux)
@@ -506,6 +514,38 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			CompanyName: data.TaxpayerInfo.CommonName,
 			Uid:         uid,
 		}
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 1. Load Main Config (for Reader)
+	mainCfg, err := storage.Load()
+	if err != nil {
+		mainCfg = Config{}
+	}
+
+	// 2. Load Raw JSON Data
+	taxRates, _ := storage.GetRawJSON(TaxRatesFile)
+	envConfig, _ := storage.GetRawJSON(TaxCoreConfigFile)
+
+	// 3. Load and Clean Verification URL
+	verUrl, _ := storage.GetVerificationUrl()
+
+	// 4. Construct Response
+	resp := ConfigResponse{
+		TaxRates:        taxRates,
+		Environment:     envConfig,
+		VerificationUrl: verUrl,
+		Reader:          mainCfg.PreferredReader,
 	}
 
 	json.NewEncoder(w).Encode(resp)
