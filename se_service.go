@@ -69,7 +69,7 @@ type TaxCategory struct {
 type InvoiceRequest struct {
 	Date          time.Time     `json:"date"`
 	TaxpayerID    string        `json:"taxpayer_id"`
-	BuyerID       string        `json:"buyer_id"` // Optional
+	BuyerID       string        `json:"buyer_id"`
 	InvoiceType   uint8         `json:"invoice_type"`
 	TransactionType uint8       `json:"transaction_type"`
 	Amount        float64       `json:"amount"`
@@ -501,6 +501,73 @@ func (s *SecureElementService) EndAudit(readerName string, payload []byte) error
 
 func (s *SecureElementService) ForwardSecureElementDirective(readerName string, payload []byte) error {
 	return s.sendExtendedCommand(readerName, InsForwardDirective, payload)
+}
+
+func (s *SecureElementService) ExportTaxCorePublicKey(readerName string) ([]byte, error) {
+	if readerName == "" {
+		return nil, fmt.Errorf("no active reader selected")
+	}
+
+	ctx, card, _, err := s.connectRaw(readerName)
+	if err != nil {
+		return nil, err
+	}
+	defer s.cleanup(ctx, card)
+
+	apdu := []byte{0x88, InsExportPublicKey, 0x04, 0x00, 0x00, 0x00, 0x00}
+
+	resp, err := card.Transmit(apdu)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transmit EXPORT PUBLIC KEY: %w", err)
+	}
+
+	if !isSuccess(resp) {
+		return nil, fmt.Errorf("EXPORT PUBLIC KEY failed with SW: %X", resp[len(resp)-2:])
+	}
+
+	return resp[:len(resp)-2], nil
+}
+
+func (s *SecureElementService) ExportAuditData(readerName string) ([]byte, error) {
+	return s.receiveExtendedCommand(readerName, InsExportAuditData)
+}
+
+func (s *SecureElementService) StartAudit(readerName string) ([]byte, error) {
+	return s.receiveExtendedCommand(readerName, InsStartAudit)
+}
+
+func (s *SecureElementService) receiveExtendedCommand(readerName string, instruction byte) ([]byte, error) {
+	if readerName == "" {
+		return nil, fmt.Errorf("no active reader selected")
+	}
+
+	ctx, card, version, err := s.connectRaw(readerName)
+	if err != nil {
+		return nil, err
+	}
+	defer s.cleanup(ctx, card)
+
+	var p1, p2 byte
+	if version.Major > 3 || (version.Major == 3 && version.Minor > 2) || (version.Major == 3 && version.Minor == 2 && version.Patch >= 5) {
+		p1 = 0x01
+		p2 = 0x02
+	} else {
+		p1 = 0x04
+		p2 = 0x00
+	}
+
+	apdu := []byte{0x88, instruction, p1, p2, 0x00, 0x00, 0x00}
+
+	resp, err := card.Transmit(apdu)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transmit extended receive command: %w", err)
+	}
+
+	if !isSuccess(resp) {
+		return nil, fmt.Errorf("command failed with SW: %X", resp[len(resp)-2:])
+	}
+
+	return resp[:len(resp)-2], nil
 }
 
 func (s *SecureElementService) sendExtendedCommand(readerName string, instruction byte, payload []byte) error {
