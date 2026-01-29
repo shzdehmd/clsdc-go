@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -164,7 +165,11 @@ func (s *CommandService) fetchCommands(apiUrl, token string) ([]TaxCoreCommand, 
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("TaxCoreAuthenticationToken", token)
 
-	client := &http.Client{}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch commands failed: %w", err)
@@ -198,7 +203,11 @@ func (s *CommandService) notifyCommandProcessed(apiUrl, token, commandId string,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("TaxCoreAuthenticationToken", token)
 
-	client := &http.Client{}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
