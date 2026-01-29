@@ -147,6 +147,8 @@ func main() {
 	mux.HandleFunc("/admin/heartbeat", handleHeartbeat)
 	mux.HandleFunc("/admin/config", handleGetConfig)
 
+	RegisterTaxCoreRoutes(mux)
+
 	// 7. Wrap with Middleware
 	handler := LoggingMiddleware(mux)
 

@@ -871,3 +871,11 @@ func (s *SecureElementService) receiveExtendedCommand(readerName string, instruc
 	}
 	return resp[:len(resp)-2], nil
 }
+
+// IsSessionActive checks if the PIN has been verified and is currently cached.
+func (s *SecureElementService) IsSessionActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// We check both the flag and the presence of the PIN
+	return s.isVerified && s.cachedPin != ""
+}
