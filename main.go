@@ -11,6 +11,7 @@ var storage *Storage
 var cardSvc *CardService
 var seSvc *SecureElementService
 var authSvc *AuthService
+var cmdSvc *CommandService
 
 type SetReaderRequest struct {
 	Reader string `json:"reader"`
@@ -31,6 +32,7 @@ func main() {
 
 	seSvc = NewSecureElementService()
 	authSvc = NewAuthService()
+	cmdSvc = NewCommandService(storage, seSvc, cardSvc)
 
 	cardSvc.SetOnCardRemoved(func(name string) {
 		log.Printf("Card removed from %s, clearing session", name)
@@ -47,6 +49,7 @@ func main() {
 	http.HandleFunc("/admin/card/last-signed-invoice", handleLastSignedInvoice)
 	http.HandleFunc("/admin/card/taxpayer-info", handleTaxpayerInfo)
 	http.HandleFunc("/admin/card/token", handleGetToken)
+	http.HandleFunc("/admin/commands/sync", handleSyncCommands)
 
 	port := ":9999"
 	fmt.Printf("Server running at http://localhost%s\n", port)
@@ -287,4 +290,22 @@ func handleGetToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(tokenResp)
+}
+
+func handleSyncCommands(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	results, err := cmdSvc.SyncCommands()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(results)
 }

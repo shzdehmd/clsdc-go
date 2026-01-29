@@ -57,7 +57,7 @@ type TaxpayerInfo struct {
 type SecureElementService struct {
 	mu         sync.Mutex
 	isVerified bool
-	cachedPin  string // Changed to string to support dynamic encoding
+	cachedPin  string
 	cachedInfo *TaxpayerInfo
 }
 
@@ -73,8 +73,6 @@ func (s *SecureElementService) ClearSession() {
 	s.cachedInfo = nil
 }
 
-// connectRaw establishes connection, selects applet, and fetches version.
-// It does NOT auto-verify PIN.
 func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *scard.Card, *SEVersion, error) {
 	ctx, err := scard.EstablishContext()
 	if err != nil {
@@ -93,7 +91,6 @@ func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *s
 		return nil, nil, nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
-	// 1. Select Applet
 	apduSelect := make([]byte, 0)
 	apduSelect = append(apduSelect, CmdSelect...)
 	apduSelect = append(apduSelect, byte(len(SecureElementAID)))
@@ -111,7 +108,6 @@ func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *s
 		return nil, nil, nil, fmt.Errorf("SELECT failed with SW: %X", resp[len(resp)-2:])
 	}
 
-	// 2. Get Version (Required to determine PIN format)
 	resp, err = card.Transmit(CmdGetVersion)
 	if err != nil {
 		s.cleanup(ctx, card)
@@ -131,14 +127,12 @@ func (s *SecureElementService) connectRaw(readerName string) (*scard.Context, *s
 	return ctx, card, version, nil
 }
 
-// connectAndSelect uses connectRaw and then attempts Auto-Verification
 func (s *SecureElementService) connectAndSelect(readerName string) (*scard.Context, *scard.Card, error) {
 	ctx, card, version, err := s.connectRaw(readerName)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Auto-Verify Logic
 	s.mu.Lock()
 	pin := s.cachedPin
 	verified := s.isVerified
@@ -173,13 +167,7 @@ func (s *SecureElementService) cleanup(ctx *scard.Context, card *scard.Card) {
 	}
 }
 
-// encodePin determines whether to use ASCII or Decimal format based on SE Version
 func (s *SecureElementService) encodePin(pin string, v *SEVersion) []byte {
-	// Logic based on documentation:
-	// 2.0.0 <= v < 3.2.2  -> Decimal
-	// 3.2.2 <= v < 3.2.9  -> ASCII
-	// 3.2.9 <= v          -> Decimal
-
 	useAscii := false
 
 	if v.Major == 3 && v.Minor == 2 {
@@ -189,17 +177,13 @@ func (s *SecureElementService) encodePin(pin string, v *SEVersion) []byte {
 	}
 
 	if useAscii {
-		// ASCII Format (e.g., "1234" -> 0x31 0x32 0x33 0x34)
 		return []byte(pin)
 	} else {
-		// Decimal Format (e.g., "1234" -> 0x01 0x02 0x03 0x04)
 		var out []byte
 		for _, char := range pin {
-			// Convert '0'-'9' to byte 0-9
 			if char >= '0' && char <= '9' {
 				out = append(out, byte(char-'0'))
 			} else {
-				// Fallback for non-digits, though PINs are usually digits
 				out = append(out, byte(char))
 			}
 		}
@@ -212,14 +196,12 @@ func (s *SecureElementService) VerifyPin(readerName string, pin string) (int, er
 		return 0, fmt.Errorf("no active reader selected")
 	}
 
-	// Use connectRaw to avoid trying the OLD cached PIN and wasting a try
 	ctx, card, version, err := s.connectRaw(readerName)
 	if err != nil {
 		return 0, err
 	}
 	defer s.cleanup(ctx, card)
 
-	// Encode the NEW pin based on the version we just fetched
 	pinBytes := s.encodePin(pin, version)
 
 	apduVerify := make([]byte, 0)
@@ -242,7 +224,7 @@ func (s *SecureElementService) VerifyPin(readerName string, pin string) (int, er
 
 	if sw == 0x9000 {
 		s.isVerified = true
-		s.cachedPin = pin // Store string
+		s.cachedPin = pin
 	} else {
 		s.isVerified = false
 		s.cachedPin = ""
@@ -256,7 +238,6 @@ func (s *SecureElementService) GetVersion(readerName string) (*SEVersion, error)
 		return nil, fmt.Errorf("no active reader selected")
 	}
 
-	// We can use connectRaw here since we just want the version
 	ctx, card, version, err := s.connectRaw(readerName)
 	if err != nil {
 		return nil, err
@@ -551,6 +532,55 @@ func (s *SecureElementService) GetTaxpayerInfo(readerName string) (*TaxpayerInfo
 	s.mu.Unlock()
 
 	return info, nil
+}
+
+func (s *SecureElementService) EndAudit(readerName string, payload []byte) error {
+	return s.sendExtendedCommand(readerName, InsEndAudit, payload)
+}
+
+func (s *SecureElementService) ForwardSecureElementDirective(readerName string, payload []byte) error {
+	return s.sendExtendedCommand(readerName, InsForwardDirective, payload)
+}
+
+func (s *SecureElementService) sendExtendedCommand(readerName string, instruction byte, payload []byte) error {
+	if readerName == "" {
+		return fmt.Errorf("no active reader selected")
+	}
+
+	ctx, card, version, err := s.connectRaw(readerName)
+	if err != nil {
+		return err
+	}
+	defer s.cleanup(ctx, card)
+
+	var p1, p2 byte
+	if version.Major > 3 || (version.Major == 3 && version.Minor > 2) || (version.Major == 3 && version.Minor == 2 && version.Patch >= 5) {
+		p1 = 0x01
+		p2 = 0x02
+	} else {
+		p1 = 0x04
+		p2 = 0x00
+	}
+
+	length := len(payload)
+
+	apdu := make([]byte, 0, length+9)
+	apdu = append(apdu, 0x88, instruction, p1, p2)
+	apdu = append(apdu, 0x00)
+	apdu = append(apdu, byte(length>>8), byte(length&0xFF))
+	apdu = append(apdu, payload...)
+	apdu = append(apdu, 0x00, 0x00)
+
+	resp, err := card.Transmit(apdu)
+	if err != nil {
+		return fmt.Errorf("failed to transmit extended command: %w", err)
+	}
+
+	if !isSuccess(resp) {
+		return fmt.Errorf("command failed with SW: %X", resp[len(resp)-2:])
+	}
+
+	return nil
 }
 
 func isSuccess(resp []byte) bool {

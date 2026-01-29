@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 
 config.json
+tax_rates.json
+taxcore_config.json
+command_log.json
